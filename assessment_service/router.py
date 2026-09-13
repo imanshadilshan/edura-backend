@@ -3,11 +3,13 @@ import random
 import uuid
 from datetime import datetime, timezone
 
+from course_client import get_course_instructor_id
 from database import get_db
 from events import publish_assessment_graded
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from models import (
     Assessment,
+    AssessmentType,
     Question,
     QuestionType,
     Submission,
@@ -17,8 +19,13 @@ from models import (
 )
 from redis_client import get_redis_client
 from schemas import (
+    AssessmentCreate,
     AssessmentResponse,
+    AssessmentUpdate,
+    QuestionAdminResponse,
+    QuestionCreate,
     QuestionPublic,
+    QuestionUpdate,
     StartSessionResponse,
     SubmitAssessmentRequest,
     SubmitAssessmentResponse,
@@ -31,6 +38,7 @@ from shared.auth import require_role
 router = APIRouter()
 
 _ALL_ROLES = ["student", "teacher", "admin"]
+_TEACHER_ADMIN = ["teacher", "admin"]
 
 
 def _get_assessment_or_404(assessment_id: int, db: Session) -> Assessment:
@@ -43,8 +51,250 @@ def _get_assessment_or_404(assessment_id: int, db: Session) -> Assessment:
     return assessment
 
 
+def _get_question_or_404(question_id: int, db: Session) -> Question:
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "QUESTION_NOT_FOUND", "message": "Question not found"},
+        )
+    return question
+
+
+async def _assert_course_owner(course_id: int, requester_id: int, requester_role: str) -> None:
+    if requester_role == "admin":
+        return
+    instructor_id = await get_course_instructor_id(course_id)
+    if instructor_id is None:
+        raise HTTPException(
+            status_code=404, detail={"error": "COURSE_NOT_FOUND", "message": "Parent course not found"}
+        )
+    if instructor_id != requester_id:
+        raise HTTPException(status_code=403, detail={"error": "NOT_COURSE_OWNER"})
+
+
+def _question_to_admin_response(q: Question) -> QuestionAdminResponse:
+    try:
+        options = json.loads(q.options_json) if q.options_json else []
+    except (ValueError, TypeError):
+        options = []
+    return QuestionAdminResponse(
+        id=q.id,
+        assessment_id=q.assessment_id,
+        question_text=q.question_text,
+        question_type=(
+            q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type)
+        ),
+        options=options,
+        correct_answer=q.correct_answer,
+        marks=q.marks,
+        position=q.position,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Assessment endpoints
+# Assessment management endpoints (teacher/admin authoring)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/", response_model=list[AssessmentResponse])
+async def list_assessments(
+    course_id: int,
+    payload: dict = Depends(require_role(_ALL_ROLES)),
+    db: Session = Depends(get_db),
+):
+    """List assessments for a course. Students only see published ones."""
+    requester_role = payload.get("role", "")
+    q = db.query(Assessment).filter(Assessment.course_id == course_id)
+    if requester_role == "student":
+        q = q.filter(Assessment.is_published.is_(True))
+    assessments = q.order_by(Assessment.id).all()
+    return assessments
+
+
+@router.post("/", response_model=AssessmentResponse, status_code=status.HTTP_201_CREATED)
+async def create_assessment(
+    body: AssessmentCreate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    await _assert_course_owner(body.course_id, requester_id, requester_role)
+
+    assessment = Assessment(
+        course_id=body.course_id,
+        lesson_id=body.lesson_id,
+        title=body.title,
+        description=body.description,
+        assessment_type=AssessmentType(body.assessment_type),
+        time_limit_minutes=body.time_limit_minutes,
+        max_score=body.max_score,
+        pass_score=body.pass_score,
+        is_published=body.is_published,
+    )
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
+    return assessment
+
+
+@router.put("/{assessment_id}", response_model=AssessmentResponse)
+async def update_assessment(
+    assessment_id: int,
+    body: AssessmentUpdate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    assessment = _get_assessment_or_404(assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    updates = body.model_dump(exclude_unset=True)
+    if "assessment_type" in updates:
+        updates["assessment_type"] = AssessmentType(updates["assessment_type"])
+    for field, value in updates.items():
+        setattr(assessment, field, value)
+
+    db.commit()
+    db.refresh(assessment)
+    return assessment
+
+
+@router.delete("/{assessment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_assessment(
+    assessment_id: int,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    assessment = _get_assessment_or_404(assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    db.query(Question).filter(Question.assessment_id == assessment_id).delete()
+    db.delete(assessment)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Question management endpoints (teacher/admin authoring)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{assessment_id}/questions", response_model=list[QuestionAdminResponse])
+async def list_questions(
+    assessment_id: int,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Full question detail (including correct answers) for the owning teacher/admin."""
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    assessment = _get_assessment_or_404(assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    questions = (
+        db.query(Question)
+        .filter(Question.assessment_id == assessment_id)
+        .order_by(Question.position)
+        .all()
+    )
+    return [_question_to_admin_response(q) for q in questions]
+
+
+@router.post(
+    "/{assessment_id}/questions",
+    response_model=QuestionAdminResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_question(
+    assessment_id: int,
+    body: QuestionCreate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    assessment = _get_assessment_or_404(assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    option_texts = [o.option_text for o in body.options]
+    correct_option = next((o.option_text for o in body.options if o.is_correct), None)
+    correct_answer = body.correct_answer or correct_option
+    if not correct_answer:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "CORRECT_ANSWER_REQUIRED",
+                "message": "Provide correct_answer, or mark one option as is_correct",
+            },
+        )
+
+    question = Question(
+        assessment_id=assessment_id,
+        question_text=body.question_text,
+        question_type=QuestionType(body.question_type),
+        options_json=json.dumps(option_texts) if option_texts else None,
+        correct_answer=correct_answer,
+        marks=body.marks,
+        position=body.position,
+    )
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return _question_to_admin_response(question)
+
+
+@router.put("/questions/{question_id}", response_model=QuestionAdminResponse)
+async def update_question(
+    question_id: int,
+    body: QuestionUpdate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    question = _get_question_or_404(question_id, db)
+    assessment = _get_assessment_or_404(question.assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    updates = body.model_dump(exclude_unset=True)
+    if "options" in updates:
+        options = updates.pop("options") or []
+        question.options_json = json.dumps([o["option_text"] for o in options]) if options else None
+        correct_from_options = next((o["option_text"] for o in options if o["is_correct"]), None)
+        if correct_from_options and "correct_answer" not in updates:
+            question.correct_answer = correct_from_options
+    if "question_type" in updates:
+        updates["question_type"] = QuestionType(updates["question_type"])
+    for field, value in updates.items():
+        setattr(question, field, value)
+
+    db.commit()
+    db.refresh(question)
+    return _question_to_admin_response(question)
+
+
+@router.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_question(
+    question_id: int,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    question = _get_question_or_404(question_id, db)
+    assessment = _get_assessment_or_404(question.assessment_id, db)
+    await _assert_course_owner(assessment.course_id, requester_id, requester_role)
+
+    db.delete(question)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Student-facing assessment endpoints
 # ---------------------------------------------------------------------------
 
 

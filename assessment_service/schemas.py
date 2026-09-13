@@ -32,6 +32,61 @@ class AssessmentResponse(AssessmentBase):
     model_config = {"from_attributes": True}
 
 
+class AssessmentCreate(AssessmentBase):
+    course_id: int
+    lesson_id: Optional[int] = None
+
+
+class AssessmentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    lesson_id: Optional[int] = None
+    assessment_type: Optional[str] = None
+    time_limit_minutes: Optional[int] = None
+    max_score: Optional[int] = None
+    pass_score: Optional[int] = None
+    is_published: Optional[bool] = None
+
+
+class QuestionOptionInput(BaseModel):
+    option_text: str
+    is_correct: bool = False
+
+
+class QuestionCreate(BaseModel):
+    question_text: str
+    question_type: str = "mcq"
+    options: List[QuestionOptionInput] = []
+    correct_answer: Optional[str] = None
+    marks: int = 1
+    position: int = 0
+
+
+class QuestionUpdate(BaseModel):
+    question_text: Optional[str] = None
+    question_type: Optional[str] = None
+    options: Optional[List[QuestionOptionInput]] = None
+    correct_answer: Optional[str] = None
+    marks: Optional[int] = None
+    position: Optional[int] = None
+
+
+class QuestionAdminResponse(BaseModel):
+    """Full question detail for the owning teacher/admin — includes the
+    correct answer, unlike QuestionPublic served to students taking the exam."""
+
+    id: int
+    assessment_id: int
+    question_text: str
+    question_type: str
+    options: List[str] = []
+    correct_answer: str
+    marks: int
+    position: int
+
+    model_config = {"from_attributes": True}
+
+
 class StartSessionResponse(BaseModel):
     session_id: str
     assessment_id: int

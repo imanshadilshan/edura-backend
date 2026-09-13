@@ -4,6 +4,15 @@ from typing import Optional
 from pydantic import BaseModel, field_validator
 
 
+class UserProfileCreate(BaseModel):
+    first_name: str
+    last_name: str
+    mobile_no: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
 class UserProfileUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None

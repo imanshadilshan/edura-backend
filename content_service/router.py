@@ -18,6 +18,8 @@ _TEACHER_ADMIN = ["teacher", "admin"]
 
 ALLOWED_MIME_TYPES = {"application/pdf", "image/png", "image/jpeg"}
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+ALLOWED_AVATAR_MIME_TYPES = {"image/png", "image/jpeg"}
+MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
 YOUTUBE_EMBED_BASE = "https://www.youtube-nocookie.com/embed"
 ALLOW_ORIGIN = "https://edura.lk"
 
@@ -139,4 +141,63 @@ async def upload_file(
         public_id=public_id,
         secure_url=secure_url,
         message="File uploaded successfully",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /avatar — self-service profile photo upload (any authenticated role)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/avatar", response_model=UploadValidationResponse)
+async def upload_avatar(
+    file: UploadFile = File(...),
+    payload: dict = Depends(require_role(_ALL_ROLES)),
+):
+    """
+    Uploads a profile photo to Cloudinary for the current user. Unlike
+    /upload (course materials, teacher/admin only), any authenticated user
+    may upload their own avatar — it is not course content.
+    """
+    content = await file.read()
+
+    if len(content) > MAX_AVATAR_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "FILE_TOO_LARGE",
+                "message": "Avatar exceeds the 5 MB limit",
+            },
+        )
+
+    declared_mime = file.content_type or ""
+    if declared_mime not in ALLOWED_AVATAR_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": "UNSUPPORTED_MEDIA_TYPE",
+                "message": f"MIME type '{declared_mime}' is not allowed. Allowed: png, jpeg",
+            },
+        )
+
+    detected_mime = magic.from_buffer(content, mime=True)
+    if detected_mime not in ALLOWED_AVATAR_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": "MIME_MISMATCH",
+                "message": f"File signature indicates '{detected_mime}', which does not match declared type",
+            },
+        )
+
+    public_id, secure_url = upload_asset(content, file.filename or "avatar")
+
+    return UploadValidationResponse(
+        valid=True,
+        filename=file.filename or "",
+        size_bytes=len(content),
+        mime_type=detected_mime,
+        public_id=public_id,
+        secure_url=secure_url,
+        message="Avatar uploaded successfully",
     )

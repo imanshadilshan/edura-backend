@@ -1,9 +1,10 @@
 from database import get_db
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models import ProfileRole, UserProfile
 from schemas import (
     PaginatedUsersResponse,
     RoleUpdateRequest,
+    UserProfileCreate,
     UserProfileResponse,
     UserProfileUpdate,
 )
@@ -49,6 +50,47 @@ async def list_users(
         page_size=page_size,
         items=[_to_response(p) for p in profiles],
     )
+
+
+@router.post("/", response_model=UserProfileResponse, status_code=status.HTTP_201_CREATED)
+async def create_own_profile(
+    body: UserProfileCreate,
+    payload: dict = Depends(require_role(_ALL_ROLES)),
+    db: Session = Depends(get_db),
+):
+    """
+    Create the profile for the currently authenticated user (self-service).
+    auth_service creates the login record on /register but has no way to
+    populate name/contact fields — the client calls this right after its
+    first login to finish setting up the account. Role is taken from the
+    JWT (assigned at registration), never from the request body.
+    """
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "").lower()
+
+    existing = db.query(UserProfile).filter(UserProfile.user_id == requester_id).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "PROFILE_EXISTS", "message": "Profile already exists for this user"},
+        )
+
+    profile = UserProfile(
+        user_id=requester_id,
+        role=ProfileRole(requester_role),
+        first_name=body.first_name,
+        last_name=body.last_name,
+        mobile_no=body.mobile_no,
+        date_of_birth=body.date_of_birth,
+        bio=body.bio,
+        avatar_url=body.avatar_url,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+
+    email = payload.get("email")
+    return _to_response(profile, email=email)
 
 
 @router.get("/{user_id}", response_model=UserProfileResponse)

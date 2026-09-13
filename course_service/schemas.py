@@ -9,6 +9,7 @@ class CourseCreate(BaseModel):
     title: str
     description: Optional[str] = None
     price: Decimal = Decimal("0.00")
+    thumbnail_url: Optional[str] = None
 
 
 class CourseUpdate(BaseModel):
@@ -16,6 +17,7 @@ class CourseUpdate(BaseModel):
     description: Optional[str] = None
     price: Optional[Decimal] = None
     status: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -32,6 +34,7 @@ class CourseResponse(BaseModel):
     price: Decimal
     teacher_id: int
     status: str
+    thumbnail_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -50,14 +53,25 @@ class CourseResponse(BaseModel):
                 if hasattr(course.status, "value")
                 else course.status
             ),
+            thumbnail_url=course.thumbnail_url,
             created_at=course.created_at,
             updated_at=course.updated_at,
         )
 
 
+class CourseOwnerResponse(BaseModel):
+    course_id: int
+    instructor_id: int
+
+
 class ModuleCreate(BaseModel):
     title: str
     order: int = 0
+
+
+class ModuleUpdate(BaseModel):
+    title: Optional[str] = None
+    order: Optional[int] = None
 
 
 class ModuleResponse(BaseModel):
@@ -86,6 +100,14 @@ class LessonCreate(BaseModel):
     cloudinary_asset_url: Optional[str] = None
     duration_seconds: Optional[int] = None
     order: int = 0
+
+
+class LessonUpdate(BaseModel):
+    title: Optional[str] = None
+    youtube_video_id: Optional[str] = None
+    cloudinary_asset_url: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    order: Optional[int] = None
 
 
 class LessonResponse(BaseModel):

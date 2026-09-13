@@ -4,12 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import Course, CourseStatus, Lesson, Module
 from schemas import (
     CourseCreate,
+    CourseOwnerResponse,
     CourseResponse,
     CourseUpdate,
     LessonCreate,
     LessonResponse,
+    LessonUpdate,
     ModuleCreate,
     ModuleResponse,
+    ModuleUpdate,
     PaginatedCoursesResponse,
 )
 from sqlalchemy.orm import Session
@@ -69,6 +72,7 @@ async def create_course(
         title=body.title,
         description=body.description,
         price=body.price,
+        thumbnail_url=body.thumbnail_url,
         status=CourseStatus.DRAFT,
     )
     db.add(course)
@@ -104,6 +108,18 @@ async def list_courses(
         page_size=page_size,
         items=[CourseResponse.from_orm_course(c) for c in courses],
     )
+
+
+@router.get("/{course_id}/owner", response_model=CourseOwnerResponse)
+async def get_course_owner(course_id: int, db: Session = Depends(get_db)):
+    """
+    Internal, unauthenticated lookup for other services (e.g. assessment_service)
+    to verify course ownership before letting a teacher manage that course's
+    assessments — mirrors enrollment_service's open internal /enrollments
+    lookup used the same way by content_service.
+    """
+    course = _get_course_or_404(course_id, db)
+    return CourseOwnerResponse(course_id=course.id, instructor_id=course.instructor_id)
 
 
 @router.get("/{course_id}", response_model=CourseResponse)
@@ -221,6 +237,50 @@ async def list_modules(
     return [ModuleResponse.from_orm_module(m) for m in modules]
 
 
+@router.put("/{course_id}/modules/{module_id}", response_model=ModuleResponse)
+async def update_module(
+    course_id: int,
+    module_id: int,
+    body: ModuleUpdate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    course = _get_course_or_404(course_id, db)
+    assert_course_owner(course, requester_id, requester_role)
+    module = _get_module_or_404(module_id, course_id, db)
+
+    updates = body.model_dump(exclude_unset=True)
+    if "order" in updates:
+        module.position = updates.pop("order")
+    for field, value in updates.items():
+        setattr(module, field, value)
+
+    db.commit()
+    db.refresh(module)
+    return ModuleResponse.from_orm_module(module)
+
+
+@router.delete("/{course_id}/modules/{module_id}", status_code=204)
+async def delete_module(
+    course_id: int,
+    module_id: int,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    course = _get_course_or_404(course_id, db)
+    assert_course_owner(course, requester_id, requester_role)
+    module = _get_module_or_404(module_id, course_id, db)
+
+    # No cross-table FK constraints in this schema — clear child lessons first.
+    db.query(Lesson).filter(Lesson.module_id == module_id).delete()
+    db.delete(module)
+    db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Lesson endpoints
 # ---------------------------------------------------------------------------
@@ -277,3 +337,68 @@ async def list_lessons(
         .all()
     )
     return [LessonResponse.from_orm_lesson(lesson) for lesson in lessons]
+
+
+@router.put(
+    "/{course_id}/modules/{module_id}/lessons/{lesson_id}",
+    response_model=LessonResponse,
+)
+async def update_lesson(
+    course_id: int,
+    module_id: int,
+    lesson_id: int,
+    body: LessonUpdate,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    course = _get_course_or_404(course_id, db)
+    assert_course_owner(course, requester_id, requester_role)
+    _get_module_or_404(module_id, course_id, db)
+
+    lesson = (
+        db.query(Lesson)
+        .filter(Lesson.id == lesson_id, Lesson.module_id == module_id)
+        .first()
+    )
+    if not lesson:
+        raise HTTPException(status_code=404, detail={"error": "LESSON_NOT_FOUND"})
+
+    updates = body.model_dump(exclude_unset=True)
+    if "order" in updates:
+        lesson.position = updates.pop("order")
+    for field, value in updates.items():
+        setattr(lesson, field, value)
+
+    db.commit()
+    db.refresh(lesson)
+    return LessonResponse.from_orm_lesson(lesson)
+
+
+@router.delete(
+    "/{course_id}/modules/{module_id}/lessons/{lesson_id}", status_code=204
+)
+async def delete_lesson(
+    course_id: int,
+    module_id: int,
+    lesson_id: int,
+    payload: dict = Depends(require_role(_TEACHER_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    requester_id = int(payload["sub"])
+    requester_role = payload.get("role", "")
+    course = _get_course_or_404(course_id, db)
+    assert_course_owner(course, requester_id, requester_role)
+    _get_module_or_404(module_id, course_id, db)
+
+    lesson = (
+        db.query(Lesson)
+        .filter(Lesson.id == lesson_id, Lesson.module_id == module_id)
+        .first()
+    )
+    if not lesson:
+        raise HTTPException(status_code=404, detail={"error": "LESSON_NOT_FOUND"})
+
+    db.delete(lesson)
+    db.commit()
