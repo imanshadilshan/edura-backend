@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
+from content_client import upload_receipt
 from database import get_db
 from events import publish_payment_success
 from fastapi import (
@@ -204,11 +205,9 @@ async def upload_manual_receipt(
             },
         )
 
-    # Simulated Azure Blob URL / stored asset path
-    receipt_filename = (
-        f"receipts/{student_id}_{course_id}_{uuid.uuid4().hex[:8]}_{file.filename}"
-    )
-    receipt_url = f"https://edurastorage.blob.core.windows.net/{receipt_filename}"
+    # Uploaded to Cloudinary via content_service, which owns the integration
+    receipt_filename = f"{student_id}_{course_id}_{uuid.uuid4().hex[:8]}_{file.filename}"
+    receipt_url, receipt_public_id = await upload_receipt(content, receipt_filename)
 
     # Create Payment record with MANUAL method and PENDING status
     payment = Payment(
@@ -228,6 +227,7 @@ async def upload_manual_receipt(
         payment_id=payment.id,
         student_id=student_id,
         receipt_url=receipt_url,
+        receipt_public_id=receipt_public_id,
         receipt_status=ReceiptStatus.PENDING,
     )
     db.add(receipt)
@@ -239,6 +239,7 @@ async def upload_manual_receipt(
         receipt_id=receipt.id,
         status="PENDING",
         receipt_url=receipt_url,
+        receipt_public_id=receipt_public_id,
         message="Manual receipt uploaded successfully and is pending review",
     )
 

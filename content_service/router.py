@@ -201,3 +201,41 @@ async def upload_avatar(
         secure_url=secure_url,
         message="Avatar uploaded successfully",
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /internal/receipt-upload — service-to-service only (payment_service)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/internal/receipt-upload", response_model=UploadValidationResponse)
+async def upload_receipt_internal(file: UploadFile = File(...)):
+    """
+    No auth dependency: called server-to-server by payment_service, which has
+    already authenticated and size/MIME-validated the request itself — mirrors
+    the same unauthenticated internal-call pattern as enrollment_service's
+    /enrollments lookup and course_service's /{course_id}/owner.
+    """
+    content = await file.read()
+
+    detected_mime = magic.from_buffer(content, mime=True)
+    if detected_mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": "MIME_MISMATCH",
+                "message": f"File signature indicates '{detected_mime}', which does not match declared type",
+            },
+        )
+
+    public_id, secure_url = upload_asset(content, file.filename or "receipt")
+
+    return UploadValidationResponse(
+        valid=True,
+        filename=file.filename or "",
+        size_bytes=len(content),
+        mime_type=detected_mime,
+        public_id=public_id,
+        secure_url=secure_url,
+        message="Receipt uploaded successfully",
+    )

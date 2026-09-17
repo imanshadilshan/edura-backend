@@ -73,6 +73,7 @@ async def create_course(
         description=body.description,
         price=body.price,
         thumbnail_url=body.thumbnail_url,
+        thumbnail_public_id=body.thumbnail_public_id,
         status=CourseStatus.DRAFT,
     )
     db.add(course)
@@ -310,6 +311,7 @@ async def create_lesson(
         title=body.title,
         youtube_video_id=body.youtube_video_id,
         cloudinary_asset_url=body.cloudinary_asset_url,
+        cloudinary_public_id=body.cloudinary_public_id,
         duration_seconds=body.duration_seconds,
         position=body.order,
     )

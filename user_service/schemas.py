@@ -11,6 +11,7 @@ class UserProfileCreate(BaseModel):
     date_of_birth: Optional[date] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    avatar_public_id: Optional[str] = None
 
 
 class UserProfileUpdate(BaseModel):
@@ -20,6 +21,7 @@ class UserProfileUpdate(BaseModel):
     date_of_birth: Optional[date] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    avatar_public_id: Optional[str] = None
 
 
 class RoleUpdateRequest(BaseModel):
@@ -45,6 +47,7 @@ class UserProfileResponse(BaseModel):
     date_of_birth: Optional[date] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    avatar_public_id: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

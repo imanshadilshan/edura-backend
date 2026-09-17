@@ -23,6 +23,7 @@ class ReceiptUploadResponse(BaseModel):
     receipt_id: int
     status: str
     receipt_url: str
+    receipt_public_id: Optional[str] = None
     message: str
 
 

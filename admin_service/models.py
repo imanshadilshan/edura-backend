@@ -74,6 +74,8 @@ class AuditLog(Base):
     )
 
     __table_args__ = (
-        Index("ix_audit_logs_actor_id", "actor_id"),
+        # actor_id already gets an index from index=True above — this
+        # duplicate Index() (same auto-generated name) made create_all()
+        # fail with DuplicateTable on every startup.
         Index("ix_audit_logs_target_type_id", "target_type", "target_id"),
     )

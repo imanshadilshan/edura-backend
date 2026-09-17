@@ -29,6 +29,7 @@ def _to_response(profile: UserProfile, email: str | None = None) -> UserProfileR
         date_of_birth=profile.date_of_birth,
         bio=profile.bio,
         avatar_url=profile.avatar_url,
+        avatar_public_id=profile.avatar_public_id,
         created_at=profile.created_at,
     )
 
@@ -84,6 +85,7 @@ async def create_own_profile(
         date_of_birth=body.date_of_birth,
         bio=body.bio,
         avatar_url=body.avatar_url,
+        avatar_public_id=body.avatar_public_id,
     )
     db.add(profile)
     db.commit()

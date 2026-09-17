@@ -10,6 +10,7 @@ class CourseCreate(BaseModel):
     description: Optional[str] = None
     price: Decimal = Decimal("0.00")
     thumbnail_url: Optional[str] = None
+    thumbnail_public_id: Optional[str] = None
 
 
 class CourseUpdate(BaseModel):
@@ -18,6 +19,7 @@ class CourseUpdate(BaseModel):
     price: Optional[Decimal] = None
     status: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    thumbnail_public_id: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -35,6 +37,7 @@ class CourseResponse(BaseModel):
     teacher_id: int
     status: str
     thumbnail_url: Optional[str] = None
+    thumbnail_public_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -54,6 +57,7 @@ class CourseResponse(BaseModel):
                 else course.status
             ),
             thumbnail_url=course.thumbnail_url,
+            thumbnail_public_id=course.thumbnail_public_id,
             created_at=course.created_at,
             updated_at=course.updated_at,
         )
@@ -98,6 +102,7 @@ class LessonCreate(BaseModel):
     title: str
     youtube_video_id: str
     cloudinary_asset_url: Optional[str] = None
+    cloudinary_public_id: Optional[str] = None
     duration_seconds: Optional[int] = None
     order: int = 0
 
@@ -106,6 +111,7 @@ class LessonUpdate(BaseModel):
     title: Optional[str] = None
     youtube_video_id: Optional[str] = None
     cloudinary_asset_url: Optional[str] = None
+    cloudinary_public_id: Optional[str] = None
     duration_seconds: Optional[int] = None
     order: Optional[int] = None
 
@@ -116,6 +122,7 @@ class LessonResponse(BaseModel):
     title: str
     youtube_video_id: Optional[str] = None
     cloudinary_asset_url: Optional[str] = None
+    cloudinary_public_id: Optional[str] = None
     duration_seconds: Optional[int] = None
     order: int
     created_at: datetime
@@ -130,6 +137,7 @@ class LessonResponse(BaseModel):
             title=lesson.title,
             youtube_video_id=lesson.youtube_video_id,
             cloudinary_asset_url=lesson.cloudinary_asset_url,
+            cloudinary_public_id=lesson.cloudinary_public_id,
             duration_seconds=lesson.duration_seconds,
             order=lesson.position,
             created_at=lesson.created_at,
