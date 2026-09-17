@@ -1,5 +1,8 @@
 import hashlib
+import json
 import secrets
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -57,7 +60,7 @@ except Exception:
 
 class TokenService:
     @staticmethod
-    def create_access_token(user_id: int, role: str) -> str:
+    def create_access_token(user_id: int, role: str, email: Optional[str] = None) -> str:
         expire = datetime.now(timezone.utc) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
@@ -67,6 +70,8 @@ class TokenService:
             "exp": expire,
             "iat": datetime.now(timezone.utc),
         }
+        if email:
+            payload["email"] = email
         return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     @staticmethod
@@ -132,6 +137,40 @@ class TokenService:
         # Create new refresh token
         new_token_str = TokenService.create_refresh_token(db, db_token.user_id)
         return db_token.user_id, new_token_str
+
+
+class GoogleAuthService:
+    """
+    Verifies a Google OAuth *access token* (implicit flow — the frontend uses
+    @react-oauth/google's useGoogleLogin({flow: 'implicit'}), not one-tap
+    id_tokens) by calling Google's userinfo endpoint directly. No client
+    secret or google-auth library needed for this flow.
+    """
+
+    USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+    @staticmethod
+    def verify_access_token(access_token: str) -> Optional[dict]:
+        try:
+            req = urllib.request.Request(
+                GoogleAuthService.USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+
+            email = data.get("email")
+            if not email:
+                return None
+
+            return {
+                "google_id": data.get("sub", ""),
+                "email": email,
+                "full_name": data.get("name", ""),
+                "picture": data.get("picture", ""),
+            }
+        except (urllib.error.HTTPError, urllib.error.URLError, Exception):
+            return None
 
 
 class SessionService:

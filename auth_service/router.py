@@ -3,15 +3,19 @@ from database import SessionLocal
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from models import User, UserRole
 from schemas import (
+    ChangePasswordRequest,
+    CurrentUserResponse,
+    GoogleLoginRequest,
     LoginRequest,
     OtpRequest,
     OtpVerifyRequest,
     RefreshRequest,
+    SetPasswordRequest,
     TokenResponse,
     UserRegisterRequest,
     UserResponse,
 )
-from services import OtpService, SessionService, TokenService
+from services import GoogleAuthService, OtpService, SessionService, TokenService
 from sqlalchemy.orm import Session
 
 from shared.auth import require_role
@@ -69,6 +73,16 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
             },
         )
 
+    # Google-only accounts have no password to check against.
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "GOOGLE_ONLY_ACCOUNT",
+                "message": "This account uses Google Sign-In. Please continue with Google, or set a password from your profile after signing in.",
+            },
+        )
+
     if not bcrypt.checkpw(
         req.password.encode("utf-8"), user.hashed_password.encode("utf-8")
     ):
@@ -81,7 +95,7 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
         )
 
     role_str = user.role.value if isinstance(user.role, UserRole) else str(user.role)
-    access_token = TokenService.create_access_token(user.id, role_str)
+    access_token = TokenService.create_access_token(user.id, role_str, user.email)
     refresh_token = TokenService.create_refresh_token(db, user.id)
 
     # Session limit management in Redis
@@ -131,7 +145,7 @@ def refresh(
         )
 
     role_str = user.role.value if isinstance(user.role, UserRole) else str(user.role)
-    new_access_token = TokenService.create_access_token(user.id, role_str)
+    new_access_token = TokenService.create_access_token(user.id, role_str, user.email)
 
     if response:
         response.set_cookie(
@@ -146,6 +160,137 @@ def refresh(
     return TokenResponse(
         access_token=new_access_token, token_type="Bearer", expires_in=900
     )
+
+
+@router.post("/google", response_model=TokenResponse)
+def google_login(req: GoogleLoginRequest, response: Response, db: Session = Depends(get_db)):
+    """
+    Sign in (or sign up) with Google. Unifies with an existing email+password
+    account: looked up by google_id first, then by email — if a password
+    account with the same email exists, this links google_id onto it instead
+    of creating a duplicate, so the same account works with both methods.
+    """
+    google_info = GoogleAuthService.verify_access_token(req.access_token)
+    if not google_info:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "INVALID_GOOGLE_TOKEN", "message": "Invalid or expired Google token"},
+        )
+
+    google_id = google_info["google_id"]
+    email = google_info["email"]
+
+    user = db.query(User).filter(User.google_id == google_id).first()
+    if not user:
+        user = db.query(User).filter(User.email == email).first()
+
+    if user:
+        if not user.google_id:
+            user.google_id = google_id
+            if not user.hashed_password:
+                user.auth_provider = "google"
+        db.commit()
+    else:
+        user = User(
+            email=email,
+            hashed_password=None,
+            role=UserRole.student,
+            is_active=True,
+            is_email_verified=True,
+            google_id=google_id,
+            auth_provider="google",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    role_str = user.role.value if isinstance(user.role, UserRole) else str(user.role)
+    access_token = TokenService.create_access_token(user.id, role_str, user.email)
+    refresh_token = TokenService.create_refresh_token(db, user.id)
+
+    SessionService.create_session(user.id, role_str)
+
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=7 * 24 * 3600,
+    )
+
+    return TokenResponse(access_token=access_token, token_type="Bearer", expires_in=900)
+
+
+@router.get("/me", response_model=CurrentUserResponse)
+def get_me(
+    payload: dict = Depends(require_role(["student", "teacher", "admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    return CurrentUserResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        is_email_verified=user.is_email_verified,
+        auth_provider=user.auth_provider,
+        has_password=user.hashed_password is not None,
+    )
+
+
+@router.post("/set-password")
+def set_password(
+    req: SetPasswordRequest,
+    payload: dict = Depends(require_role(["student", "teacher", "admin"])),
+    db: Session = Depends(get_db),
+):
+    """Let a Google-only account add a password, so it can log in either way."""
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    if user.hashed_password:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "PASSWORD_ALREADY_SET", "message": "A password is already set. Use change-password instead."},
+        )
+
+    user.hashed_password = bcrypt.hashpw(
+        req.new_password.encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+    db.commit()
+    return {"message": "Password set successfully. You can now log in with email and password."}
+
+
+@router.post("/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    payload: dict = Depends(require_role(["student", "teacher", "admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "NO_PASSWORD_SET", "message": "No password set yet. Use set-password instead."},
+        )
+    if not bcrypt.checkpw(
+        req.current_password.encode("utf-8"), user.hashed_password.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "INVALID_CREDENTIALS", "message": "Current password is incorrect"},
+        )
+
+    user.hashed_password = bcrypt.hashpw(
+        req.new_password.encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+    db.commit()
+    return {"message": "Password updated successfully"}
 
 
 @router.post("/otp/request")
