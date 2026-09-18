@@ -26,7 +26,9 @@ from schemas import (
     QuestionCreate,
     QuestionPublic,
     QuestionUpdate,
+    ReviewItem,
     StartSessionResponse,
+    SubmissionRanking,
     SubmitAssessmentRequest,
     SubmitAssessmentResponse,
     ViolationRequest,
@@ -49,6 +51,31 @@ def _get_assessment_or_404(assessment_id: int, db: Session) -> Assessment:
             detail={"error": "ASSESSMENT_NOT_FOUND", "message": "Assessment not found"},
         )
     return assessment
+
+
+def _build_review(questions: list[Question], answers_dict: dict) -> list[ReviewItem]:
+    """Per-question breakdown for a graded submission — options are stored as
+    plain option text (not separate rows with ids), so the option text itself
+    doubles as its "id", matching how /start already exposes options to the UI."""
+    review = []
+    for q in questions:
+        user_answer = (answers_dict.get(q.id) or "").strip()
+        is_correct = (
+            q.question_type in (QuestionType.mcq, QuestionType.true_false)
+            and bool(user_answer)
+            and user_answer.lower() == str(q.correct_answer).strip().lower()
+        )
+        review.append(
+            ReviewItem(
+                question_id=q.id,
+                question_text=q.question_text,
+                explanation=None,
+                selected_option_id=user_answer or None,
+                correct_option_id=str(q.correct_answer),
+                is_correct=is_correct,
+            )
+        )
+    return review
 
 
 def _get_question_or_404(question_id: int, db: Session) -> Question:
@@ -505,6 +532,7 @@ async def submit_assessment(
     submission.answers_json = json.dumps([a.model_dump() for a in body.answers])
     submission.submitted_at = datetime.now(timezone.utc)
     db.commit()
+    db.refresh(submission)
 
     # Clear Redis keys
     redis_c.delete(session_key)
@@ -518,6 +546,21 @@ async def submit_assessment(
         passed=passed,
     )
 
+    time_taken = 0
+    if submission.started_at and submission.submitted_at:
+        time_taken = int((submission.submitted_at - submission.started_at).total_seconds())
+
+    overall_rank = (
+        db.query(Submission)
+        .filter(
+            Submission.assessment_id == assessment_id,
+            Submission.status == SubmissionStatus.graded,
+            Submission.score > score,
+        )
+        .count()
+        + 1
+    )
+
     return SubmitAssessmentResponse(
         session_id=body.session_id,
         score=score,
@@ -525,6 +568,92 @@ async def submit_assessment(
         correct_count=correct_count,
         total_questions=total_questions,
         auto_submitted=auto_submitted,
+        time_taken_seconds=time_taken,
+        review=_build_review(questions, answers_dict),
+        ranking=SubmissionRanking(
+            exam_id=assessment_id,
+            course_id=assessment.course_id,
+            exam_title=assessment.title,
+            overall_rank=overall_rank,
+        ),
+    )
+
+
+@router.get("/{assessment_id}/my-last-attempt", response_model=SubmitAssessmentResponse)
+@router.get(
+    "/api/assessments/{assessment_id}/my-last-attempt",
+    response_model=SubmitAssessmentResponse,
+)
+async def get_my_last_attempt(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    payload: dict = Depends(require_role(_ALL_ROLES)),
+):
+    """
+    Re-fetches a student's own most recent graded attempt on this assessment
+    — lets them navigate back to their results (e.g. via a "My Results" list)
+    without needing to keep the submit response around client-side, and is
+    what a ?view=results deep link resolves against.
+    """
+    student_id = int(payload["sub"])
+    assessment = _get_assessment_or_404(assessment_id, db)
+
+    submission = (
+        db.query(Submission)
+        .filter(
+            Submission.assessment_id == assessment_id,
+            Submission.student_id == student_id,
+            Submission.status == SubmissionStatus.graded,
+        )
+        .order_by(Submission.submitted_at.desc())
+        .first()
+    )
+    if not submission:
+        raise HTTPException(status_code=404, detail={"error": "NO_ATTEMPT_FOUND"})
+
+    questions = db.query(Question).filter(Question.assessment_id == assessment_id).all()
+    answers_dict = {}
+    if submission.answers_json:
+        for a in json.loads(submission.answers_json):
+            answers_dict[a["question_id"]] = a["selected_option"]
+
+    correct_count = sum(
+        1
+        for q in questions
+        if q.question_type in (QuestionType.mcq, QuestionType.true_false)
+        and answers_dict.get(q.id, "").strip().lower() == str(q.correct_answer).strip().lower()
+    )
+
+    time_taken = 0
+    if submission.started_at and submission.submitted_at:
+        time_taken = int((submission.submitted_at - submission.started_at).total_seconds())
+
+    overall_rank = (
+        db.query(Submission)
+        .filter(
+            Submission.assessment_id == assessment_id,
+            Submission.status == SubmissionStatus.graded,
+            Submission.score > submission.score,
+        )
+        .count()
+        + 1
+    )
+
+    return SubmitAssessmentResponse(
+        session_id="",
+        score=float(submission.score or 0),
+        passed=float(submission.score or 0) >= assessment.pass_score,
+        correct_count=correct_count,
+        total_questions=len(questions),
+        auto_submitted=False,
+        time_taken_seconds=time_taken,
+        review=_build_review(questions, answers_dict),
+        ranking=SubmissionRanking(
+            exam_id=assessment_id,
+            course_id=assessment.course_id,
+            exam_title=assessment.title,
+            overall_rank=overall_rank,
+        ),
     )
 
 

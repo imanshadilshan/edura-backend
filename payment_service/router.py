@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from content_client import upload_receipt
+from course_client import get_course_price
 from database import get_db
 from events import publish_payment_success
 from fastapi import (
@@ -18,6 +19,8 @@ from models import Payment, PaymentMethod, PaymentReceipt, PaymentStatus, Receip
 from schemas import (
     CheckoutRequest,
     CheckoutResponse,
+    FreeEnrollRequest,
+    FreeEnrollResponse,
     PaymentResponse,
     ReceiptAdminResponse,
     ReceiptUploadResponse,
@@ -90,6 +93,70 @@ async def init_checkout(
         hash=checkout_hash,
         redirect_url=PAYHERE_CHECKOUT_URL,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /free-enroll — Instant enrollment for price=0 courses
+# ---------------------------------------------------------------------------
+@router.post("/free-enroll", response_model=FreeEnrollResponse, status_code=status.HTTP_200_OK)
+async def free_enroll(
+    body: FreeEnrollRequest,
+    payload: dict = Depends(require_role(["student"])),
+    db: Session = Depends(get_db),
+):
+    """
+    There is no direct "create an enrollment" endpoint anywhere — every
+    enrollment is created by enrollment_service's consumer reacting to a
+    payment.success event (from the PayHere webhook, or a manually-approved
+    receipt). A price=0 course still needs the same event, just without an
+    actual payment — this creates a $0 Payment record for the audit trail
+    and publishes the identical event so enrollment_service treats it
+    exactly like any other successful payment.
+    """
+    student_id = int(payload["sub"])
+
+    price = await get_course_price(body.course_id)
+    if price is None:
+        raise HTTPException(status_code=404, detail={"error": "COURSE_NOT_FOUND"})
+    if price != 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "COURSE_NOT_FREE", "message": "This course is not free — use checkout instead."},
+        )
+
+    existing = (
+        db.query(Payment)
+        .filter(
+            Payment.student_id == student_id,
+            Payment.course_id == body.course_id,
+            Payment.payment_status == PaymentStatus.SUCCESS,
+        )
+        .first()
+    )
+    if existing:
+        return FreeEnrollResponse(message="Already enrolled", course_id=body.course_id, payment_id=existing.id)
+
+    payment = Payment(
+        student_id=student_id,
+        course_id=body.course_id,
+        payment_method=PaymentMethod.MANUAL,
+        payment_status=PaymentStatus.SUCCESS,
+        amount=0,
+        currency="LKR",
+        paid_at=datetime.now(timezone.utc),
+    )
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+
+    publish_payment_success(
+        student_id=student_id,
+        course_id=body.course_id,
+        order_id=f"FREE-{payment.id}",
+        amount=0,
+    )
+
+    return FreeEnrollResponse(message="Enrolled successfully", course_id=body.course_id, payment_id=payment.id)
 
 
 # ---------------------------------------------------------------------------

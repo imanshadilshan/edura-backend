@@ -9,6 +9,16 @@ class CheckoutRequest(BaseModel):
     amount: Optional[float] = Field(None, description="Course price in LKR")
 
 
+class FreeEnrollRequest(BaseModel):
+    course_id: int
+
+
+class FreeEnrollResponse(BaseModel):
+    message: str
+    course_id: int
+    payment_id: int
+
+
 class CheckoutResponse(BaseModel):
     order_id: str
     merchant_id: str

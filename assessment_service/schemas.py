@@ -105,6 +105,22 @@ class SubmitAssessmentRequest(BaseModel):
     answers: List[AnswerItem] = []
 
 
+class ReviewItem(BaseModel):
+    question_id: int
+    question_text: str
+    explanation: Optional[str] = None
+    selected_option_id: Optional[str] = None
+    correct_option_id: str
+    is_correct: bool
+
+
+class SubmissionRanking(BaseModel):
+    exam_id: int
+    course_id: int
+    exam_title: str
+    overall_rank: Optional[int] = None
+
+
 class SubmitAssessmentResponse(BaseModel):
     session_id: str
     score: float
@@ -112,6 +128,9 @@ class SubmitAssessmentResponse(BaseModel):
     correct_count: int
     total_questions: int
     auto_submitted: bool = False
+    time_taken_seconds: int = 0
+    review: List[ReviewItem] = []
+    ranking: Optional[SubmissionRanking] = None
 
 
 class ViolationRequest(BaseModel):
