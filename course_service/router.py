@@ -25,6 +25,20 @@ _ALL_ROLES = ["student", "teacher", "admin"]
 _TEACHER_ADMIN = ["teacher", "admin"]
 
 
+def get_allowed_grades_for_student(grade: int) -> list[int]:
+    """
+    Grade-level course visibility rules (matches the reference platform):
+    - Grade 11 sees grades 10 & 11 (upper O/L unlocks lower)
+    - Grade 13 sees grades 12 & 13 (upper A/L unlocks lower)
+    - All other grades (5-10, 12) see only their own grade
+    """
+    if grade == 11:
+        return [10, 11]
+    if grade == 13:
+        return [12, 13]
+    return [grade]
+
+
 # ---------------------------------------------------------------------------
 # Ownership helper
 # ---------------------------------------------------------------------------
@@ -72,6 +86,8 @@ async def create_course(
         title=body.title,
         description=body.description,
         price=body.price,
+        grade=body.grade,
+        stream_ids=body.stream_ids,
         thumbnail_url=body.thumbnail_url,
         thumbnail_public_id=body.thumbnail_public_id,
         status=CourseStatus.DRAFT,
@@ -85,6 +101,8 @@ async def create_course(
 @router.get("/", response_model=PaginatedCoursesResponse)
 async def list_courses(
     status: str = Query(None),
+    grade: int | None = Query(None, description="The viewer's own grade — applies the O/L (10↔11) and A/L (12↔13) unlock bands"),
+    stream_id: int | None = Query(None, description="The viewer's own A/L stream (only applied for grade 12/13)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     payload: dict | None = Depends(get_optional_payload),
@@ -92,19 +110,41 @@ async def list_courses(
 ):
     # Public browsing: anonymous visitors and students both only ever see
     # published courses; only a logged-in teacher/admin can filter by status.
-    requester_role = payload.get("role", "").lower().lower() if payload else ""
+    requester_role = payload.get("role", "").lower() if payload else ""
     q = db.query(Course)
 
+    apply_stream_filter = False
     if not payload or requester_role == "student":
         q = q.filter(Course.status == CourseStatus.PUBLISHED)
+        if grade is not None:
+            allowed = get_allowed_grades_for_student(grade)
+            # A course with no grade set is legacy/ungated — stays visible to everyone.
+            q = q.filter((Course.grade.in_(allowed)) | (Course.grade.is_(None)))
+            # Streams only apply at A/L (12/13) — a course can belong to more
+            # than one stream (e.g. Physics is shared by Physical Science and
+            # Bio Science), so this is a JSON-array containment check done in
+            # Python below rather than in SQL (cheap at this catalogue size,
+            # and portable — the generic JSON column type has no efficient
+            # cross-dialect "array contains" operator).
+            apply_stream_filter = grade in (12, 13) and stream_id is not None
     elif status:
         try:
             q = q.filter(Course.status == CourseStatus(status))
         except ValueError:
             raise HTTPException(status_code=422, detail={"error": "INVALID_STATUS"})
 
-    total = q.count()
-    courses = q.offset((page - 1) * page_size).limit(page_size).all()
+    if apply_stream_filter:
+        all_matching = q.order_by(Course.id).all()
+        filtered = [
+            c for c in all_matching
+            if not c.stream_ids or stream_id in c.stream_ids
+        ]
+        total = len(filtered)
+        courses = filtered[(page - 1) * page_size : (page - 1) * page_size + page_size]
+    else:
+        total = q.count()
+        courses = q.offset((page - 1) * page_size).limit(page_size).all()
+
     return PaginatedCoursesResponse(
         total=total,
         page=page,

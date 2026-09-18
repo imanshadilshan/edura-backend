@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from models import OtpPurpose, UserRole
@@ -82,3 +83,34 @@ class SetPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
+
+
+# ── Admin management (admin-only; never reachable from public /register) ────
+
+
+class CreateAdminRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    first_name: str
+    last_name: str
+
+
+class UserStatusUpdateRequest(BaseModel):
+    is_active: bool
+
+
+class InternalUserResponse(BaseModel):
+    """Bulk-listing shape for other services (e.g. user_service enriching an
+    admin-facing profile list with the is_active/email fields that only
+    auth_service owns) — served from an unauthenticated /internal/ route,
+    matching the pattern already used for cross-service reads elsewhere
+    (course_service's /owner, content_service's /internal/receipt-upload)."""
+
+    id: int
+    email: str
+    role: UserRole
+    is_active: bool
+    is_email_verified: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

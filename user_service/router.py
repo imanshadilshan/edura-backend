@@ -1,6 +1,7 @@
 import secrets
 import string
 
+from auth_client import get_all_auth_users, get_auth_user
 from database import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models import GradeSubject, ProfileRole, Stream, UserProfile
@@ -8,7 +9,9 @@ from schemas import (
     GradeSubjectCreate,
     GradeSubjectResponse,
     GradeSubjectUpdate,
+    InternalProfileCreateRequest,
     PaginatedUsersResponse,
+    RoleStatsResponse,
     RoleUpdateRequest,
     StreamCreate,
     StreamResponse,
@@ -26,7 +29,9 @@ router = APIRouter()
 _ALL_ROLES = ["student", "teacher", "admin"]
 
 
-def _to_response(profile: UserProfile, email: str | None = None) -> UserProfileResponse:
+def _to_response(
+    profile: UserProfile, email: str | None = None, is_active: bool | None = None
+) -> UserProfileResponse:
     return UserProfileResponse(
         id=profile.user_id,
         name=f"{profile.first_name} {profile.last_name}",
@@ -47,6 +52,7 @@ def _to_response(profile: UserProfile, email: str | None = None) -> UserProfileR
         selected_subjects=profile.selected_subjects,
         referral_code=profile.referral_code,
         referred_by_user_id=profile.referred_by_user_id,
+        is_active=is_active,
         created_at=profile.created_at,
     )
 
@@ -67,19 +73,42 @@ def _generate_referral_code(db: Session, first_name: str) -> str:
 async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    role: str | None = Query(None),
+    search: str | None = Query(None),
     payload: dict = Depends(require_role(["admin"])),
     db: Session = Depends(get_db),
 ):
-    """Admin: paginated list of all user profiles."""
+    """Admin: paginated list of all user profiles, enriched with the
+    is_active/email fields that only auth_service's User row actually owns."""
+    q = db.query(UserProfile)
+    if role:
+        try:
+            q = q.filter(UserProfile.role == ProfileRole(role))
+        except ValueError:
+            raise HTTPException(status_code=422, detail={"error": "INVALID_ROLE"})
+    if search:
+        like = f"%{search}%"
+        q = q.filter(
+            (UserProfile.first_name.ilike(like)) | (UserProfile.last_name.ilike(like))
+        )
+
+    total = q.count()
     offset = (page - 1) * page_size
-    total = db.query(UserProfile).count()
-    profiles = db.query(UserProfile).offset(offset).limit(page_size).all()
-    return PaginatedUsersResponse(
-        total=total,
-        page=page,
-        page_size=page_size,
-        items=[_to_response(p) for p in profiles],
-    )
+    profiles = q.order_by(UserProfile.id.desc()).offset(offset).limit(page_size).all()
+
+    auth_users = await get_all_auth_users()
+    items = []
+    for p in profiles:
+        auth_row = auth_users.get(p.user_id)
+        items.append(
+            _to_response(
+                p,
+                email=auth_row["email"] if auth_row else None,
+                is_active=auth_row["is_active"] if auth_row else None,
+            )
+        )
+
+    return PaginatedUsersResponse(total=total, page=page, page_size=page_size, items=items)
 
 
 @router.post("/", response_model=UserProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -141,6 +170,37 @@ async def create_own_profile(
 
     email = payload.get("email")
     return _to_response(profile, email=email)
+
+
+@router.post("/internal/create-profile", response_model=UserProfileResponse, status_code=status.HTTP_201_CREATED)
+async def create_profile_internal(body: InternalProfileCreateRequest, db: Session = Depends(get_db)):
+    """
+    Unauthenticated, service-to-service only (mirrors /owner-style internal
+    endpoints elsewhere). Called by auth_service right after it creates a
+    privileged admin account on behalf of another admin — that flow has no
+    JWT for the new user to self-service a profile with, unlike normal
+    register->login->createProfile.
+    """
+    existing = db.query(UserProfile).filter(UserProfile.user_id == body.user_id).first()
+    if existing:
+        return _to_response(existing)
+
+    try:
+        role = ProfileRole(body.role)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_ROLE"})
+
+    profile = UserProfile(
+        user_id=body.user_id,
+        role=role,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        referral_code=_generate_referral_code(db, body.first_name),
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return _to_response(profile)
 
 
 # ── Streams & Subjects reference data ────────────────────────────────────────
@@ -284,6 +344,20 @@ async def get_subjects_for_grade(
     return [r.name for r in rows]
 
 
+@router.get("/stats", response_model=RoleStatsResponse)
+async def get_role_stats(
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    """Admin dashboard headline counts — cheap grouped COUNT query, no
+    cross-service call needed since role lives on the profile itself."""
+    return RoleStatsResponse(
+        total_students=db.query(UserProfile).filter(UserProfile.role == ProfileRole.student).count(),
+        total_teachers=db.query(UserProfile).filter(UserProfile.role == ProfileRole.teacher).count(),
+        total_admins=db.query(UserProfile).filter(UserProfile.role == ProfileRole.admin).count(),
+    )
+
+
 @router.get("/{user_id}", response_model=UserProfileResponse)
 async def get_user(
     user_id: int,
@@ -292,7 +366,7 @@ async def get_user(
 ):
     """Get a user profile. Own record always allowed; other records require admin."""
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
 
     if requester_id != user_id and requester_role != "admin":
         raise HTTPException(
@@ -304,9 +378,17 @@ async def get_user(
     if not profile:
         raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
 
-    # Include email from JWT when the requester is viewing their own record
-    email = payload.get("email") if requester_id == user_id else None
-    return _to_response(profile, email=email)
+    # Include email from JWT when the requester is viewing their own record;
+    # for any other record (an admin viewing someone else's), ask
+    # auth_service for both email and is_active.
+    if requester_id == user_id:
+        email = payload.get("email")
+        is_active = None
+    else:
+        auth_row = await get_auth_user(user_id)
+        email = auth_row["email"] if auth_row else None
+        is_active = auth_row["is_active"] if auth_row else None
+    return _to_response(profile, email=email, is_active=is_active)
 
 
 @router.put("/{user_id}", response_model=UserProfileResponse)
@@ -318,7 +400,7 @@ async def update_user(
 ):
     """Update a user profile. Own record allowed; other records require admin."""
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
 
     if requester_id != user_id and requester_role != "admin":
         raise HTTPException(

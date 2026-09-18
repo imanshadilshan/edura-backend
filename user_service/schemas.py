@@ -124,6 +124,11 @@ class UserProfileResponse(BaseModel):
     referral_code: Optional[str] = None
     referred_by_user_id: Optional[int] = None
 
+    # Only populated when the caller enriched the list from auth_service's
+    # /internal/users (e.g. the admin listing) — auth_service, not this
+    # service, is the source of truth for both fields.
+    is_active: Optional[bool] = None
+
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -134,6 +139,19 @@ class PaginatedUsersResponse(BaseModel):
     page: int
     page_size: int
     items: list[UserProfileResponse]
+
+
+class InternalProfileCreateRequest(BaseModel):
+    user_id: int
+    role: str
+    first_name: str
+    last_name: str
+
+
+class RoleStatsResponse(BaseModel):
+    total_students: int
+    total_teachers: int
+    total_admins: int
 
 
 # ── Streams & Subjects (reference data used by the registration form) ───────

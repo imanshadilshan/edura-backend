@@ -19,7 +19,9 @@ from schemas import (
     CheckoutRequest,
     CheckoutResponse,
     PaymentResponse,
+    ReceiptAdminResponse,
     ReceiptUploadResponse,
+    ReceiptVerifyRequest,
 )
 from sqlalchemy.orm import Session
 from utils import (
@@ -253,9 +255,108 @@ async def list_user_payments(
     db: Session = Depends(get_db),
 ):
     student_id = int(payload["sub"])
-    role = payload.get("role", "")
+    role = payload.get("role", "").lower()
     if role == "admin":
         payments = db.query(Payment).all()
     else:
         payments = db.query(Payment).filter(Payment.student_id == student_id).all()
     return payments
+
+
+# ---------------------------------------------------------------------------
+# Admin: review manual bank-slip receipts
+# ---------------------------------------------------------------------------
+@router.get("/receipts", response_model=list[ReceiptAdminResponse])
+async def list_receipts(
+    status_filter: str | None = None,
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    q = db.query(PaymentReceipt, Payment).join(Payment, PaymentReceipt.payment_id == Payment.id)
+    if status_filter:
+        try:
+            q = q.filter(PaymentReceipt.receipt_status == ReceiptStatus(status_filter.upper()))
+        except ValueError:
+            raise HTTPException(status_code=422, detail={"error": "INVALID_STATUS"})
+    rows = q.order_by(PaymentReceipt.created_at.desc()).all()
+    return [
+        ReceiptAdminResponse(
+            id=receipt.id,
+            payment_id=receipt.payment_id,
+            student_id=receipt.student_id,
+            course_id=payment.course_id,
+            amount=float(payment.amount),
+            receipt_url=receipt.receipt_url,
+            receipt_public_id=receipt.receipt_public_id,
+            status=receipt.receipt_status.value.lower(),
+            reviewer_id=receipt.reviewer_id,
+            reviewer_note=receipt.reviewer_note,
+            reviewed_at=receipt.reviewed_at,
+            created_at=receipt.created_at,
+        )
+        for receipt, payment in rows
+    ]
+
+
+@router.put("/receipts/{receipt_id}/verify", response_model=ReceiptAdminResponse)
+async def verify_receipt(
+    receipt_id: int,
+    body: ReceiptVerifyRequest,
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    receipt = db.query(PaymentReceipt).filter(PaymentReceipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail={"error": "RECEIPT_NOT_FOUND"})
+    if receipt.receipt_status != ReceiptStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "ALREADY_REVIEWED", "message": "This receipt has already been reviewed"},
+        )
+
+    payment = db.query(Payment).filter(Payment.id == receipt.payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail={"error": "PAYMENT_NOT_FOUND"})
+
+    reviewer_id = int(payload["sub"])
+    receipt.reviewer_id = reviewer_id
+    receipt.reviewed_at = datetime.now(timezone.utc)
+
+    if body.status == "verified":
+        receipt.receipt_status = ReceiptStatus.APPROVED
+        payment.payment_status = PaymentStatus.SUCCESS
+        payment.paid_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(receipt)
+        db.refresh(payment)
+
+        # Same event the PayHere webhook publishes — enrollment_service's
+        # consumer activates/extends the enrollment identically either way.
+        publish_payment_success(
+            student_id=payment.student_id,
+            course_id=payment.course_id,
+            order_id=f"MANUAL-{payment.id}",
+            amount=float(payment.amount),
+        )
+    else:
+        receipt.receipt_status = ReceiptStatus.REJECTED
+        receipt.reviewer_note = body.rejection_reason
+        payment.payment_status = PaymentStatus.FAILED
+        db.commit()
+        db.refresh(receipt)
+        db.refresh(payment)
+
+    return ReceiptAdminResponse(
+        id=receipt.id,
+        payment_id=receipt.payment_id,
+        student_id=receipt.student_id,
+        course_id=payment.course_id,
+        amount=float(payment.amount),
+        receipt_url=receipt.receipt_url,
+        receipt_public_id=receipt.receipt_public_id,
+        status=receipt.receipt_status.value.lower(),
+        reviewer_id=receipt.reviewer_id,
+        reviewer_note=receipt.reviewer_note,
+        reviewed_at=receipt.reviewed_at,
+        created_at=receipt.created_at,
+    )

@@ -4,8 +4,10 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from models import User, UserRole
 from schemas import (
     ChangePasswordRequest,
+    CreateAdminRequest,
     CurrentUserResponse,
     GoogleLoginRequest,
+    InternalUserResponse,
     LoginRequest,
     OtpRequest,
     OtpVerifyRequest,
@@ -14,9 +16,11 @@ from schemas import (
     TokenResponse,
     UserRegisterRequest,
     UserResponse,
+    UserStatusUpdateRequest,
 )
 from services import GoogleAuthService, OtpService, SessionService, TokenService
 from sqlalchemy.orm import Session
+from user_client import create_profile_internal
 
 from shared.auth import require_role
 
@@ -46,8 +50,9 @@ def register(req: UserRegisterRequest, db: Session = Depends(get_db)):
         )
 
     # Public self-registration can only ever create student/teacher accounts.
-    # Admin accounts are created out-of-band (see scripts/create_master_admin.py)
-    # — never accept role=admin from a client request here.
+    # Admin accounts are created out-of-band (create_master_admin.py, or by an
+    # existing admin via POST /admin/create-admin below) — never accept
+    # role=admin from a client request here.
     role = req.role if req.role != UserRole.admin else UserRole.student
 
     hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode(
@@ -64,6 +69,103 @@ def register(req: UserRegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.get("/internal/users", response_model=list[InternalUserResponse])
+def list_users_internal(db: Session = Depends(get_db)):
+    """
+    Unauthenticated, service-to-service only (mirrors course_service's
+    /owner and content_service's /internal/receipt-upload). Lets user_service
+    enrich its admin-facing profile listings with is_active/email — fields
+    that only exist on this service's User row, not on a UserProfile.
+    """
+    return db.query(User).all()
+
+
+@router.get("/internal/users/{user_id}", response_model=InternalUserResponse)
+def get_user_internal(user_id: int, db: Session = Depends(get_db)):
+    """Singular counterpart to /internal/users — used where only one
+    account's is_active/email is needed (e.g. user_service's GET /{user_id})
+    instead of pulling the whole table for a single lookup."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    return user
+
+
+@router.post("/admin/create-admin", response_model=UserResponse, status_code=201)
+async def create_admin(
+    req: CreateAdminRequest,
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    """
+    The only way to create another admin account short of the offline
+    create_master_admin.py script — public /register can never do this
+    (see the role downgrade above). Also creates the matching user_service
+    profile so the new admin shows up immediately, with a name, in the
+    admin list — unlike a self-registered account, nobody will ever log in
+    as this user to run the normal register->login->createProfile flow.
+    """
+    existing = db.query(User).filter(User.email == req.email).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "EMAIL_EXISTS", "message": "Email already registered"},
+        )
+
+    hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user = User(
+        email=req.email,
+        hashed_password=hashed,
+        role=UserRole.admin,
+        is_active=True,
+        is_email_verified=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    await create_profile_internal(user.id, "admin", req.first_name, req.last_name)
+
+    return user
+
+
+@router.put("/users/{user_id}/status")
+def update_user_status(
+    user_id: int,
+    body: UserStatusUpdateRequest,
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+
+    user.is_active = body.is_active
+    db.commit()
+    return {"user_id": user.id, "is_active": user.is_active}
+
+
+@router.delete("/users/{user_id}", status_code=204)
+def delete_user(
+    user_id: int,
+    payload: dict = Depends(require_role(["admin"])),
+    db: Session = Depends(get_db),
+):
+    """
+    Deletes the login record. Paired with user_service's own DELETE
+    /{user_id} for the profile — the admin frontend calls both so a
+    "delete student/admin" action removes the account everywhere, not just
+    its profile (which would otherwise leave a login-only account behind
+    that could still authenticate but show up nowhere).
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+
+    db.delete(user)
+    db.commit()
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -96,6 +198,15 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
             detail={
                 "error": "INVALID_CREDENTIALS",
                 "message": "Email or password is incorrect",
+            },
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "ACCOUNT_DEACTIVATED",
+                "message": "This account has been deactivated. Please contact support.",
             },
         )
 
@@ -208,6 +319,15 @@ def google_login(req: GoogleLoginRequest, response: Response, db: Session = Depe
         db.add(user)
         db.commit()
         db.refresh(user)
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "ACCOUNT_DEACTIVATED",
+                "message": "This account has been deactivated. Please contact support.",
+            },
+        )
 
     role_str = user.role.value if isinstance(user.role, UserRole) else str(user.role)
     access_token = TokenService.create_access_token(user.id, role_str, user.email)

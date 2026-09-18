@@ -17,6 +17,8 @@ app = FastAPI(title="Course Service")
 _COLUMN_MIGRATIONS = (
     "ALTER TABLE courses ADD COLUMN IF NOT EXISTS thumbnail_public_id VARCHAR(255)",
     "ALTER TABLE lessons ADD COLUMN IF NOT EXISTS cloudinary_public_id VARCHAR(255)",
+    "ALTER TABLE courses ADD COLUMN IF NOT EXISTS grade INTEGER",
+    "ALTER TABLE courses ADD COLUMN IF NOT EXISTS stream_ids JSON",
 )
 
 

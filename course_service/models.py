@@ -9,7 +9,7 @@ module structure, and lesson hierarchy.
 import enum
 
 from database import Base  # shared Base from database.py
-from sqlalchemy import Boolean, DateTime, Enum, Index, Integer, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -56,6 +56,15 @@ class Course(Base):
         Enum(CourseType, name="coursetype"), nullable=False, default=CourseType.video
     )
     price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0.00)
+    # Nullable: existing courses created before this field was added stay
+    # visible to every grade rather than being retroactively hidden.
+    grade: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Only meaningful for grade 12/13 (A/L) courses — a course can belong to
+    # more than one stream since some subjects (e.g. Physics, Chemistry) are
+    # shared across streams. Stored as a plain JSON array of user_service
+    # Stream ids (cross-service reference, no FK — streams live in a
+    # different database). Empty/null = visible to every stream.
+    stream_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[CourseStatus] = mapped_column(
         Enum(CourseStatus, name="coursestatusenum"),

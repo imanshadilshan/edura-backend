@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -40,3 +40,23 @@ class PaymentResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ReceiptAdminResponse(BaseModel):
+    id: int
+    payment_id: int
+    student_id: int
+    course_id: int
+    amount: float
+    receipt_url: str
+    receipt_public_id: Optional[str] = None
+    status: str
+    reviewer_id: Optional[int] = None
+    reviewer_note: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ReceiptVerifyRequest(BaseModel):
+    status: Literal["verified", "rejected"]
+    rejection_reason: Optional[str] = None

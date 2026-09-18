@@ -9,14 +9,25 @@ class CourseCreate(BaseModel):
     title: str
     description: Optional[str] = None
     price: Decimal = Decimal("0.00")
+    grade: Optional[int] = None
+    stream_ids: Optional[list[int]] = None
     thumbnail_url: Optional[str] = None
     thumbnail_public_id: Optional[str] = None
+
+    @field_validator("grade")
+    @classmethod
+    def validate_grade(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (5 <= v <= 13):
+            raise ValueError("grade must be between 5 and 13")
+        return v
 
 
 class CourseUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     price: Optional[Decimal] = None
+    grade: Optional[int] = None
+    stream_ids: Optional[list[int]] = None
     status: Optional[str] = None
     thumbnail_url: Optional[str] = None
     thumbnail_public_id: Optional[str] = None
@@ -28,12 +39,21 @@ class CourseUpdate(BaseModel):
             raise ValueError("status must be DRAFT, PUBLISHED, or ARCHIVED")
         return v
 
+    @field_validator("grade")
+    @classmethod
+    def validate_grade(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (5 <= v <= 13):
+            raise ValueError("grade must be between 5 and 13")
+        return v
+
 
 class CourseResponse(BaseModel):
     id: int
     title: str
     description: Optional[str] = None
     price: Decimal
+    grade: Optional[int] = None
+    stream_ids: Optional[list[int]] = None
     teacher_id: int
     status: str
     thumbnail_url: Optional[str] = None
@@ -50,6 +70,8 @@ class CourseResponse(BaseModel):
             title=course.title,
             description=course.description,
             price=course.price,
+            grade=course.grade,
+            stream_ids=course.stream_ids,
             teacher_id=course.instructor_id,
             status=(
                 course.status.value
