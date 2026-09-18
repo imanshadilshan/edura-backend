@@ -17,7 +17,7 @@ from schemas import (
 )
 from sqlalchemy.orm import Session
 
-from shared.auth import require_role
+from shared.auth import get_optional_payload, require_role
 
 router = APIRouter()
 
@@ -87,13 +87,15 @@ async def list_courses(
     status: str = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    payload: dict = Depends(require_role(_ALL_ROLES)),
+    payload: dict | None = Depends(get_optional_payload),
     db: Session = Depends(get_db),
 ):
-    requester_role = payload.get("role", "")
+    # Public browsing: anonymous visitors and students both only ever see
+    # published courses; only a logged-in teacher/admin can filter by status.
+    requester_role = payload.get("role", "").lower().lower() if payload else ""
     q = db.query(Course)
 
-    if requester_role == "student":
+    if not payload or requester_role == "student":
         q = q.filter(Course.status == CourseStatus.PUBLISHED)
     elif status:
         try:
@@ -126,12 +128,12 @@ async def get_course_owner(course_id: int, db: Session = Depends(get_db)):
 @router.get("/{course_id}", response_model=CourseResponse)
 async def get_course(
     course_id: int,
-    payload: dict = Depends(require_role(_ALL_ROLES)),
+    payload: dict | None = Depends(get_optional_payload),
     db: Session = Depends(get_db),
 ):
     course = _get_course_or_404(course_id, db)
-    requester_role = payload.get("role", "")
-    if requester_role == "student" and course.status != CourseStatus.PUBLISHED:
+    requester_role = payload.get("role", "").lower().lower() if payload else ""
+    if (not payload or requester_role == "student") and course.status != CourseStatus.PUBLISHED:
         raise HTTPException(status_code=404, detail={"error": "COURSE_NOT_FOUND"})
     return CourseResponse.from_orm_course(course)
 
@@ -144,7 +146,7 @@ async def update_course(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
 
@@ -191,7 +193,7 @@ async def delete_course(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     db.delete(course)
@@ -211,7 +213,7 @@ async def create_module(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
 
@@ -225,10 +227,13 @@ async def create_module(
 @router.get("/{course_id}/modules", response_model=list[ModuleResponse])
 async def list_modules(
     course_id: int,
-    payload: dict = Depends(require_role(_ALL_ROLES)),
+    payload: dict | None = Depends(get_optional_payload),
     db: Session = Depends(get_db),
 ):
-    _get_course_or_404(course_id, db)
+    course = _get_course_or_404(course_id, db)
+    requester_role = payload.get("role", "").lower().lower() if payload else ""
+    if (not payload or requester_role == "student") and course.status != CourseStatus.PUBLISHED:
+        raise HTTPException(status_code=404, detail={"error": "COURSE_NOT_FOUND"})
     modules = (
         db.query(Module)
         .filter(Module.course_id == course_id)
@@ -247,7 +252,7 @@ async def update_module(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     module = _get_module_or_404(module_id, course_id, db)
@@ -271,7 +276,7 @@ async def delete_module(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     module = _get_module_or_404(module_id, course_id, db)
@@ -300,7 +305,7 @@ async def create_lesson(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     _get_module_or_404(module_id, course_id, db)
@@ -327,11 +332,14 @@ async def create_lesson(
 async def list_lessons(
     course_id: int,
     module_id: int,
-    payload: dict = Depends(require_role(_ALL_ROLES)),
+    payload: dict | None = Depends(get_optional_payload),
     db: Session = Depends(get_db),
 ):
-    _get_course_or_404(course_id, db)
+    course = _get_course_or_404(course_id, db)
     _get_module_or_404(module_id, course_id, db)
+    requester_role = payload.get("role", "").lower().lower() if payload else ""
+    if (not payload or requester_role == "student") and course.status != CourseStatus.PUBLISHED:
+        raise HTTPException(status_code=404, detail={"error": "COURSE_NOT_FOUND"})
     lessons = (
         db.query(Lesson)
         .filter(Lesson.module_id == module_id)
@@ -354,7 +362,7 @@ async def update_lesson(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     _get_module_or_404(module_id, course_id, db)
@@ -389,7 +397,7 @@ async def delete_lesson(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     course = _get_course_or_404(course_id, db)
     assert_course_owner(course, requester_id, requester_role)
     _get_module_or_404(module_id, course_id, db)

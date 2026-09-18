@@ -33,7 +33,7 @@ from schemas import (
 )
 from sqlalchemy.orm import Session
 
-from shared.auth import require_role
+from shared.auth import get_optional_payload, require_role
 
 router = APIRouter()
 
@@ -100,13 +100,13 @@ def _question_to_admin_response(q: Question) -> QuestionAdminResponse:
 @router.get("/", response_model=list[AssessmentResponse])
 async def list_assessments(
     course_id: int,
-    payload: dict = Depends(require_role(_ALL_ROLES)),
+    payload: dict | None = Depends(get_optional_payload),
     db: Session = Depends(get_db),
 ):
-    """List assessments for a course. Students only see published ones."""
-    requester_role = payload.get("role", "")
+    """List assessments for a course. Anonymous visitors and students only see published ones."""
+    requester_role = payload.get("role", "").lower() if payload else ""
     q = db.query(Assessment).filter(Assessment.course_id == course_id)
-    if requester_role == "student":
+    if not payload or requester_role == "student":
         q = q.filter(Assessment.is_published.is_(True))
     assessments = q.order_by(Assessment.id).all()
     return assessments
@@ -119,7 +119,7 @@ async def create_assessment(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     await _assert_course_owner(body.course_id, requester_id, requester_role)
 
     assessment = Assessment(
@@ -147,7 +147,7 @@ async def update_assessment(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     assessment = _get_assessment_or_404(assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)
 
@@ -169,7 +169,7 @@ async def delete_assessment(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     assessment = _get_assessment_or_404(assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)
 
@@ -191,7 +191,7 @@ async def list_questions(
 ):
     """Full question detail (including correct answers) for the owning teacher/admin."""
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     assessment = _get_assessment_or_404(assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)
 
@@ -216,7 +216,7 @@ async def create_question(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     assessment = _get_assessment_or_404(assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)
 
@@ -255,7 +255,7 @@ async def update_question(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     question = _get_question_or_404(question_id, db)
     assessment = _get_assessment_or_404(question.assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)
@@ -284,7 +284,7 @@ async def delete_question(
     db: Session = Depends(get_db),
 ):
     requester_id = int(payload["sub"])
-    requester_role = payload.get("role", "")
+    requester_role = payload.get("role", "").lower()
     question = _get_question_or_404(question_id, db)
     assessment = _get_assessment_or_404(question.assessment_id, db)
     await _assert_course_owner(assessment.course_id, requester_id, requester_role)

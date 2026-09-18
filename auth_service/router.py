@@ -45,13 +45,18 @@ def register(req: UserRegisterRequest, db: Session = Depends(get_db)):
             detail={"error": "EMAIL_EXISTS", "message": "Email already registered"},
         )
 
+    # Public self-registration can only ever create student/teacher accounts.
+    # Admin accounts are created out-of-band (see scripts/create_master_admin.py)
+    # — never accept role=admin from a client request here.
+    role = req.role if req.role != UserRole.admin else UserRole.student
+
     hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode(
         "utf-8"
     )
     user = User(
         email=req.email,
         hashed_password=hashed,
-        role=req.role,
+        role=role,
         is_active=True,
         is_email_verified=False,
     )
